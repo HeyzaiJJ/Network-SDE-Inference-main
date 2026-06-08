@@ -9,7 +9,7 @@ from matplotlib import pyplot as plt
 
 import sys
 
-sys.path.append("../Network-SDE-Inference/utils")
+sys.path.append("../Network-SDE-Inference_1/utils")
 import NeuGNN_model
 import Self_func
 import Interaction_func

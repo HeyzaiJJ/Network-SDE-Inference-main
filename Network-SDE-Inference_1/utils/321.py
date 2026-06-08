@@ -5,12 +5,12 @@ from matplotlib import pyplot as plt
 import sys
 
 # 添加工具库路径（根据您的实际路径调整）
-sys.path.append("../Network-SDE-Inference/utils")
+sys.path.append("../Network-SDE-Inference_1/utils")
 from NeuGNN_model import *
 from Interaction_func import *
 
 # ====================== 新增：定义图片保存路径并确保路径存在 ======================
-SAVE_DIR = r"C:\Users\chenzhijia\Desktop\Network-SDE-Inference-main\Network-SDE-Inference\utils"
+SAVE_DIR = r"/Network-SDE-Inference_1\utils"
 os.makedirs(SAVE_DIR, exist_ok=True)  # 若路径不存在则创建，存在则不报错
 
 # ====================== 核心参数配置（适配您的需求） ======================

@@ -5,13 +5,23 @@ from matplotlib import pyplot as plt
 import sys
 
 # 添加工具库路径（根据您的实际路径调整）
-sys.path.append("../Network-SDE-Inference/utils")
+sys.path.append("../Network-SDE-Inference_1/utils")
 from NeuGNN_model import *
 from Interaction_func import *
 
+from copy import deepcopy
+from tqdm import tqdm
+from torch.optim.lr_scheduler import OneCycleLR
+from torch_geometric.data import Data, DataLoader
+from sklearn.model_selection import train_test_split
+from sklearn.metrics import r2_score
+from torch.distributions import Normal
+from torch.distributions.kl import kl_divergence
+
+
 # ====================== 新增：定义图片保存路径并确保路径存在 ======================
-SAVE_DIR = r"C:\Users\chenzhijia\Desktop\Network-SDE-Inference-main\Network-SDE-Inference\utils"
-os.makedirs(SAVE_DIR, exist_ok=True)  # 若路径不存在则创建，存在则不报错
+# SAVE_DIR = r"../Network-SDE-Inference_1/utils"
+# os.makedirs(SAVE_DIR, exist_ok=True)  # 若路径不存在则创建，存在则不报错
 
 # ====================== 核心参数配置（适配您的需求） ======================
 # 自动判断GPU并配置设备
@@ -23,21 +33,19 @@ Num_nodes = 100  # 数据节点数：100
 Dimension = 1  # 数据特征维度：1（[200,100]→[200,100,1]）
 ndim = Dimension * 1  # 特征维度保持1维（与模型参数名统一）
 delt_t = 0.01  # 时间步长
-msg_dim = 1  # 消息维度适配1维特征
+msg_dim =  1 # 消息维度适配1维特征
 hidden = 100  # 模型隐藏层维度
 aggr = 'add'  # 聚合方式
 model = 'Lorenz'  # 模型标识
 batch_size = 1  # batch参数改为1
 total_epochs = 50  # 训练轮数（可调整）
 batch_per_epoch = 156  # 每轮batch数（可调整）
-init_lr = 1e-3  # 初始学习率
+init_lr = 5e-4  # 初始学习率
 
 # ====================== 1. 读取并处理您的原始数据 [200,100] ======================
-# 读取您的时序数据（请替换为您的实际文件路径）
-Timeseries = pd.read_csv('../utils/100_bcNGSdwran20220607_141207A3108HRfMRIBOLDs004a1001.csv', encoding='utf-8',
+# 读取您的时序数据
+Timeseries = pd.read_csv('../utils/new_data/100_time_series_csv/Anomic/100_bcNGSdwransub-M2006_ses-a3942_task-rest_bold.csv', encoding='utf-8',
                          header=None)
-# print(f"原始数据形状: {Timeseries.shape}")  # 应输出 (200, 100)
-
 # 转换为 [时间步长 × 节点数 × 特征维度] 格式
 timeseries = Timeseries.values.reshape((-1, Num_nodes, Dimension)).astype(np.float32)  # 强制float32
 # print(f"重塑后数据形状: {timeseries.shape}")  # 应输出 (200, 100, 1)
@@ -65,7 +73,6 @@ y = torch.as_tensor(goal_data, dtype=torch.float32).to(DEVICE)
 
 # %%
 # ====================== 3. 分割训练集/测试集（时序友好分割） ======================
-from sklearn.model_selection import train_test_split
 
 # 先转回CPU分割（sklearn不支持GPU张量），分割后再移回GPU
 X_np = X.cpu().numpy()
@@ -85,19 +92,29 @@ y_test = torch.tensor(y_test, dtype=torch.float32, device=DEVICE)
 
 # ====================== 4. 读取100×100邻接矩阵并处理 edge_index ======================
 # 读取您处理后的100×100邻接矩阵文件（核心修复：强制裁剪为100×100）
-Adj = pd.read_csv('../utils/100x100_correlation_matrix.csv', encoding='utf-8', header=None)
-# 核心修复1：强制裁剪为100×100，去掉多余的行/列
-Adj = Adj.iloc[:100, :100]  # 只保留前100行、前100列
-Adj = Adj.fillna(0)  # 填充空值
-Adj = Adj.astype(np.float32)  # 统一类型
-# print(f"邻接矩阵形状: {Adj.shape}")  # 必须输出 (100, 100)
-assert Adj.shape == (100, 100), "邻接矩阵必须是100×100！"  # 断言校验，避免维度错误
-
+Adj = pd.read_csv('../utils/new_data/100x100_correlation_matrix/Anomic/100_bcNGSdwransub-M2006_ses-a3942_task-rest_bold.csv', encoding='utf-8', header=None)
+Adj = Adj.values.astype(np.float32)
+# print(f"邻接矩阵形状: {Adj.shape}")
+assert Adj.shape == (100, 100), "邻接矩阵必须是100×100！"
+# 防止异常值
+Adj = np.clip(Adj, -1.0, 1.0)
+# 去除自连接（推荐）
+np.fill_diagonal(Adj, 0)
+# 转回DataFrame（后续代码兼容）
+Adj = pd.DataFrame(Adj)
 
 # 构建edge_index（source→target）- 强化索引校验，确保索引≤99
 def get_edge_index(Adj):
-    num_nodes = Adj.shape[0]
-    Adj_np = Adj.values
+    Adj_np = Adj.values.copy()
+
+    # 稀疏化（核心优化）
+    threshold = 0.7
+    Adj_np[np.abs(Adj_np) < threshold] = 0
+
+    # 统计边密度
+    density = np.sum(Adj_np != 0) / (Adj_np.shape[0] ** 2)
+    print(f"图连接密度: {density:.4f}")
+
     # 只保留非0的边，并转换为整数索引
     edge_index = np.where(Adj_np != 0)  # 仅取邻接矩阵中非0的边
     edge_index = np.array(edge_index, dtype=np.int64)  # 强制转为int64（GPU要求）
@@ -118,8 +135,6 @@ assert torch.max(edge_index).item() <= 99, "edge_index索引必须≤99！"
 # print(f"edge_index设备: {edge_index.device}")  # 应输出 cuda:0（若有GPU）
 
 # ====================== 5. 构建DataLoader（batch_size=1） ======================
-from torch_geometric.data import Data, DataLoader
-
 
 # 定义数据转换函数（修复batch处理+设备/类型统一）
 def create_data_list(X, y, edge_index, device):
@@ -169,9 +184,8 @@ ogn = SDIunweighted(
 # print("模型初始化完成")
 
 # ====================== 7. 定义优化器和学习率调度器 ======================
-from torch.optim.lr_scheduler import OneCycleLR
 
-opt = torch.optim.Adam(ogn.parameters(), lr=init_lr, weight_decay=1e-8)
+opt = torch.optim.Adam(ogn.parameters(), lr=init_lr, weight_decay=1e-5)
 sched = OneCycleLR(opt, max_lr=init_lr,
                    steps_per_epoch=batch_per_epoch,
                    epochs=total_epochs, final_div_factor=1e5)
@@ -276,7 +290,6 @@ newtestloader = DataLoader(
 )
 
 # ====================== 10. 训练模型（原始逻辑+GPU异常捕获） ======================
-from tqdm import tqdm
 
 # 初始化记录列表
 messages_over_time = []
@@ -353,7 +366,6 @@ for epoch in tqdm(range(epoch, total_epochs), desc="Training"):
 
     # 保存模型状态
     ogn.to("cpu")
-    from copy import deepcopy
 
     recorded_models.append(deepcopy(ogn.state_dict()))
     ogn.to(DEVICE)
@@ -369,6 +381,9 @@ for epoch in tqdm(range(epoch, total_epochs), desc="Training"):
 print("\n========== Calculate the inference error ==========")
 ogn.eval()
 inference_errors = []
+
+kl_errors = []
+
 predictions = []
 true_values = []
 
@@ -379,11 +394,24 @@ with torch.no_grad():
         # 模型返回元组：(Normal分布对象, xUpdate张量)
         model_output = ogn(ginput.x, ginput.edge_index)
         # 核心修复：提取Normal分布的均值（张量类型）作为预测值
-        pred = model_output[0].mean  # 替换原pred = model_output[0]
+        pred_dist = model_output[0]
+
+        # 预测均值（用于MSE）
+        pred = pred_dist.mean
 
         # 仅计算MSE误差（原始核心）
         mse_error = torch.mean((pred - ginput.y) ** 2).item()
         inference_errors.append(mse_error)
+
+        # 构造真实分布
+        true_mean = ginput.y
+        true_std = torch.std(ginput.y) * torch.ones_like(true_mean)
+        true_dist = Normal(true_mean, true_std)
+
+        # 4. 计算KL divergence
+        kl_error = kl_divergence(true_dist, pred_dist).mean().item()
+        kl_errors.append(kl_error)
+
         # 保存预测值和真实值
         predictions.append(pred.detach().cpu().numpy())
         true_values.append(ginput.y.cpu().numpy())
@@ -392,11 +420,16 @@ with torch.no_grad():
 predictions = np.array(predictions)
 true_values = np.array(true_values)
 
-# 仅计算平均MSE（原始逻辑）
+# 计算平均MSE（原始逻辑）
 mean_mse = np.mean(inference_errors)
 print(f"测试集平均MSE误差: {mean_mse:.6f}")
 
-# 基础可视化（原始核心折线图）
+# 平均KL divergence
+mean_kl = np.mean(kl_errors)
+print(f"平均KL divergence: {mean_kl:.6f}")
+
+'''
+# MSE可视化（原始核心折线图）
 plt.figure(figsize=(8, 4))
 node_idx = 0
 max_time_steps = min(50, len(true_values))
@@ -408,8 +441,22 @@ plt.ylabel('Value')
 plt.title('Prediction vs True Value')
 plt.legend(loc='best')
 # 保存折线图到指定路径
-plt.savefig(os.path.join(SAVE_DIR, "prediction_vs_true.png"), dpi=300, bbox_inches='tight')
+# plt.savefig(os.path.join(SAVE_DIR, "prediction_vs_true_1.png"), dpi=300, bbox_inches='tight')
 plt.show()
+'''
+
+'''
+# KL divergence可视化（分布直方图）
+plt.figure(figsize=(8, 5))
+plt.hist(kl_errors, bins=30, alpha=0.7)
+plt.xlabel('KL Divergence')
+plt.ylabel('Frequency')
+plt.title('Distribution of KL Divergence')
+plt.grid(True)
+# 保存图片
+plt.savefig(os.path.join(SAVE_DIR, "kl_divergence_histogram_1.png"), dpi=300, bbox_inches='tight')
+plt.show()
+'''
 
 # ====================== 13. Learn the stochastic differential equations（纯原始代码逻辑） ======================
 print("\n========== Learn the stochastic differential equations ==========")
@@ -459,6 +506,7 @@ print("\n========== Check the accuracy ==========")
 y_true_flat = true_values.flatten()
 y_pred_flat = predictions.flatten()
 
+'''
 # 仅基础可视化（原始核心散点图）
 plt.figure(figsize=(8, 6))
 plt.scatter(y_true_flat[:1000], y_pred_flat[:1000], alpha=0.5, s=10)
@@ -470,14 +518,86 @@ plt.ylabel('Predicted Value')
 plt.title('Accuracy Check')
 plt.legend(loc='best')
 # 保存散点图到指定路径
-plt.savefig(os.path.join(SAVE_DIR, "accuracy_scatter.png"), dpi=300, bbox_inches='tight')
+# plt.savefig(os.path.join(SAVE_DIR, "accuracy_scatter_1.png"), dpi=300, bbox_inches='tight')
 plt.show()
+'''
 
 # 仅打印基础精度信息（原始逻辑）
 print(f"预测值范围: [{np.min(y_pred_flat):.4f}, {np.max(y_pred_flat):.4f}]")
 print(f"真实值范围: [{np.min(y_true_flat):.4f}, {np.max(y_true_flat):.4f}]")
 
+# ====================== 新增：计算决定系数 R² ======================
+
+r2 = r2_score(y_true_flat, y_pred_flat)
+print(f"决定系数 R²: {r2:.6f}")
+
 # 额外提示：打印图片保存路径
-print(f"\n图片已保存到：{SAVE_DIR}")
-print(f"- 预测值vs真实值折线图：prediction_vs_true.png")
-print(f"- 精度散点图：accuracy_scatter.png")
+# print(f"\n图片已保存到：{SAVE_DIR}")
+# print(f"- 预测值vs真实值折线图：prediction_vs_true_1.png")
+# print(f"- 精度散点图：accuracy_scatter_1.png")
+
+# ====================== 15. Lyapunov Stability Analysis ======================
+print("\n========== Lyapunov Stability Analysis ==========")
+
+ogn.eval()
+lyapunov_values = []
+
+with torch.no_grad():
+
+    for ginput in testloader:
+        ginput = ginput.to(DEVICE)
+
+        # 原始输入
+        x0 = ginput.x.clone()
+
+        # 添加微小扰动
+        epsilon = 1e-5
+        perturbation = epsilon * torch.randn_like(x0)
+        x1 = x0 + perturbation
+
+        # 原始轨迹预测
+        pred0 = ogn(x0, ginput.edge_index)[0].mean
+
+        # 扰动后轨迹预测
+        pred1 = ogn(x1, ginput.edge_index)[0].mean
+
+        # 初始距离
+        delta0 = torch.norm(x1 - x0)
+
+        # 演化后距离
+        delta1 = torch.norm(pred1 - pred0)
+
+        # 防止log(0)
+        delta1 = torch.clamp(delta1, min=1e-12)
+
+        # Lyapunov exponent
+
+        lyapunov = torch.log(delta1 / delta0)
+        lyapunov_values.append(lyapunov.item())
+
+# 平均Lyapunov指数
+mean_lyapunov = np.mean(lyapunov_values)
+print(f"平均Lyapunov指数: {mean_lyapunov:.6f}")
+'''
+# Lyapunov曲线
+plt.figure(figsize=(8, 4))
+plt.plot(    np.arange(len(lyapunov_values)), lyapunov_values, linewidth=2)
+plt.xlabel('Test Sample')
+plt.ylabel('Lyapunov Exponent')
+plt.title('Lyapunov Stability Across Test Samples')
+plt.grid(True)
+# 保存图片
+plt.savefig(os.path.join(SAVE_DIR, "lyapunov_curve_1.png"), dpi=300, bbox_inches='tight')
+plt.show()
+
+# Lyapunov分布直方图
+plt.figure(figsize=(8, 5))
+plt.hist(lyapunov_values, bins=30, alpha=0.7)
+plt.xlabel('Lyapunov Exponent')
+plt.ylabel('Frequency')
+plt.title('Distribution of Lyapunov Exponents')
+plt.grid(True)
+# 保存图片
+plt.savefig(os.path.join(SAVE_DIR, "lyapunov_histogram_1.png"), dpi=300, bbox_inches='tight')
+plt.show()
+'''
