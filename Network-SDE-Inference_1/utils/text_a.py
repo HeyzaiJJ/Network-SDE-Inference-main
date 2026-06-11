@@ -43,9 +43,9 @@ total_epochs = 50
 init_lr = 5e-4
 
 # 路径
-TIME_DIR = r"C:\Users\chenzhijia\Desktop\Network-SDE-Inference-main\Network-SDE-Inference_1\utils\new_data\100_time_series_csv\None"
-ADJ_DIR = r"C:\Users\chenzhijia\Desktop\Network-SDE-Inference-main\Network-SDE-Inference_1\utils\new_data\100x100_correlation_matrix\None"
-RESULT_DIR = r"C:\Users\chenzhijia\Desktop\Network-SDE-Inference-main\Network-SDE-Inference_1\utils\batch_results_d"
+TIME_DIR = r"C:\Users\chenzhijia\Desktop\Network-SDE-Inference-main\Network-SDE-Inference_1\utils\new_data\100_time_series_csv\Healthy"
+ADJ_DIR = r"C:\Users\chenzhijia\Desktop\Network-SDE-Inference-main\Network-SDE-Inference_1\utils\new_data\100x100_correlation_matrix\Healthy"
+RESULT_DIR = r"C:\Users\chenzhijia\Desktop\Network-SDE-Inference-main\Network-SDE-Inference_1\utils\batch_results_e"
 os.makedirs(RESULT_DIR, exist_ok=True)
 
 # 获取全部CSV文件
