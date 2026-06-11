@@ -5,4 +5,4 @@ KL_divergence:
 <img src="..utils/every_indicator_EXP/KL_divergence_boxplot.png">
 Lyapunov:
 <img src="..utils/every_indicator_EXP/Lyapunov_boxplot.png">
-两个指标显示：该项目方法效果更好
+两个指标显示：该项目方法拟合的模型效果更好
